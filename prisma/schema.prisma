@@ -1,0 +1,72 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model IpoStock {
+  id                    String   @id @default(cuid())
+  symbol                String   @unique
+  name                  String
+  sector                String
+  ipoDate               String
+  ipoPrice              Float
+  ipoOpenPrice          Float    @default(0)
+  ipoDayLow             Float    @default(0)
+  ipoDayHigh            Float    @default(0)
+  currentPrice          Float    @default(0)
+  listingGainPct        Float    @default(0)
+  marketCap             String   @default("")
+  exchange              String   @default("NSE")
+
+  horizontalPivotScore  Int      @default(0)
+  volumeDryUpScore      Int      @default(0)
+  breakoutVolumeScore   Int      @default(0)
+  vcpScore              Int      @default(0)
+  priceVsIpoLowScore    Int      @default(0)
+  weeklyConvictionScore Int      @default(0)
+  totalScore            Int      @default(0)
+
+  baseStatus            String   @default("FORMING")
+  baseWeeks             Int      @default(0)
+  pivotLevel            Float?
+  supportLevel          Float?
+  breakoutDate          String?
+  recommendation        String   @default("WATCH")
+
+  dailyPrices           DailyPrice[]
+  weeklyPrices          WeeklyPrice[]
+}
+
+model DailyPrice {
+  id       String   @id @default(cuid())
+  stockId  String
+  date     String
+  open     Float
+  high     Float
+  low      Float
+  close    Float
+  volume   Float
+
+  stock    IpoStock @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@index([stockId, date])
+}
+
+model WeeklyPrice {
+  id       String   @id @default(cuid())
+  stockId  String
+  date     String
+  open     Float
+  high     Float
+  low      Float
+  close    Float
+  volume   Float
+
+  stock    IpoStock @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@index([stockId, date])
+}
