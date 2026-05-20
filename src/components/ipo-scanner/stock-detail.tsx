@@ -80,7 +80,14 @@ export function StockDetail({ stock, open, onClose }: StockDetailProps) {
 
         {/* Info Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
-          <InfoCard label="Current Price" value={`₹${stock.currentPrice.toFixed(0)}`} />
+          <InfoCard 
+            label="Current Price" 
+            value={`₹${stock.currentPrice.toFixed(0)}`} 
+            sublabel={stock.dataSource && stock.dataSource !== 'seed' && stock.lastUpdated && stock.lastUpdated !== 'never' 
+              ? `Live • ${new Date(stock.lastUpdated).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`
+              : 'Seed data'} 
+            sublabelColor={stock.dataSource && stock.dataSource !== 'seed' ? 'text-emerald-500/70' : 'text-amber-500/70'}
+          />
           <InfoCard label="IPO Price" value={`₹${stock.ipoPrice.toFixed(0)}`} />
           <InfoCard
             label="Gain from IPO"
@@ -168,11 +175,12 @@ export function StockDetail({ stock, open, onClose }: StockDetailProps) {
   )
 }
 
-function InfoCard({ label, value, valueColor = 'text-white' }: { label: string; value: string; valueColor?: string }) {
+function InfoCard({ label, value, valueColor = 'text-white', sublabel, sublabelColor = 'text-slate-500' }: { label: string; value: string; valueColor?: string; sublabel?: string; sublabelColor?: string }) {
   return (
     <div className="rounded-lg bg-slate-900/50 border border-slate-700/50 p-2.5">
       <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-0.5">{label}</div>
       <div className={`text-sm font-semibold ${valueColor}`}>{value}</div>
+      {sublabel && <div className={`text-[9px] mt-0.5 ${sublabelColor}`}>{sublabel}</div>}
     </div>
   )
 }

@@ -128,6 +128,8 @@ export async function POST(request: Request) {
         listingGainPct: Math.round(listingGainPct * 100) / 100,
         marketCap: marketCap || '',
         exchange: exchange || 'NSE',
+        lastUpdated: 'never',
+        dataSource: 'manual',
         dailyPrices: { create: dailyPrices },
         weeklyPrices: { create: weeklyPrices },
       },

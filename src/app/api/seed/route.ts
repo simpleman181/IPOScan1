@@ -703,6 +703,8 @@ export async function POST() {
           supportLevel: Math.round(supportLevel * 100) / 100,
           breakoutDate,
           recommendation: scores.recommendation,
+          lastUpdated: 'never',
+          dataSource: 'seed',
         },
       })
 

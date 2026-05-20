@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useIpoStore } from '@/lib/ipo-store'
 import { ScannerProvider } from '@/components/ipo-scanner/scanner-provider'
@@ -11,6 +11,8 @@ import { StockDetail } from '@/components/ipo-scanner/stock-detail'
 import { StockListManager } from '@/components/ipo-scanner/stock-list-manager'
 import { toast } from 'sonner'
 
+const AUTO_REFRESH_INTERVAL = 60_000 // 60 seconds
+
 function IpoScannerApp() {
   const queryClient = useQueryClient()
   const {
@@ -19,6 +21,9 @@ function IpoScannerApp() {
   } = useIpoStore()
 
   const [selectedStock, setSelectedStock] = useState<any>(null)
+  const [lastUpdated, setLastUpdated] = useState<string>('')
+  const [dataSource, setDataSource] = useState<string>('seed')
+  const autoRefreshRef = useRef<NodeJS.Timeout | null>(null)
 
   // Fetch stocks with filters
   const { data: stocksData, isLoading } = useQuery({
@@ -53,15 +58,43 @@ function IpoScannerApp() {
       const data = await res.json()
       if (data.seeded) {
         setIsSeeded(true)
-        toast.success(`Database seeded with ${data.message.match(/\d+/)?.[0] || '20'} stocks`)
+        toast.success(`Database seeded with ${data.message.match(/\d+/)?.[0] || '20'} stocks. Fetching live prices...`)
         queryClient.invalidateQueries({ queryKey: ['ipo-stocks'] })
+        // Auto-trigger full refresh after seeding to replace synthetic data with live data
+        setTimeout(() => {
+          handleFullRefresh()
+        }, 1000)
       } else {
-        setIsSeeded(true) // Already seeded
+        setIsSeeded(true)
+        // Already seeded - still trigger price refresh on load
+        setTimeout(() => {
+          handleRefreshPrices()
+        }, 1000)
       }
     } catch {
       toast.error('Failed to seed database')
     }
   }
+
+  // Set up auto-refresh interval
+  useEffect(() => {
+    if (autoRefreshRef.current) {
+      clearInterval(autoRefreshRef.current)
+    }
+
+    autoRefreshRef.current = setInterval(() => {
+      // Only auto-refresh if not already refreshing or scanning
+      if (!isRefreshingData && !isScanning) {
+        handleRefreshPrices()
+      }
+    }, AUTO_REFRESH_INTERVAL)
+
+    return () => {
+      if (autoRefreshRef.current) {
+        clearInterval(autoRefreshRef.current)
+      }
+    }
+  }, [isRefreshingData, isScanning])
 
   // Fetch single stock detail
   const fetchStockDetail = useCallback(async (id: string) => {
@@ -97,12 +130,15 @@ function IpoScannerApp() {
         body: JSON.stringify({ mode: 'prices' }),
       })
       const data = await res.json()
-      toast.success(data.message || 'Prices refreshed')
+      if (data.failed > 0) {
+        toast.warning(`Prices updated for ${data.updated}/${data.total} stocks (${data.failed} failed to fetch)`)
+      } else {
+        toast.success(data.message || 'Live prices refreshed')
+      }
+      if (data.timestamp) setLastUpdated(data.timestamp)
       queryClient.invalidateQueries({ queryKey: ['ipo-stocks'] })
-      // Auto-scan after refresh
-      await handleRunScanner()
     } catch {
-      toast.error('Failed to refresh prices')
+      toast.error('Failed to refresh prices - check your connection')
     } finally {
       setIsRefreshingData(false)
     }
@@ -117,11 +153,18 @@ function IpoScannerApp() {
         body: JSON.stringify({ mode: 'full' }),
       })
       const data = await res.json()
-      toast.success(data.message || 'Full refresh complete')
+      if (data.failed > 0) {
+        toast.warning(`Full refresh: ${data.updated}/${data.total} stocks updated (${data.failed} failed)`)
+      } else {
+        toast.success(data.message || 'Full refresh complete with live data')
+      }
+      if (data.timestamp) setLastUpdated(data.timestamp)
+      setDataSource('live')
       queryClient.invalidateQueries({ queryKey: ['ipo-stocks'] })
+      // Auto-scan after full refresh
       await handleRunScanner()
     } catch {
-      toast.error('Failed to full refresh')
+      toast.error('Failed to fetch live data - check your connection')
     } finally {
       setIsRefreshingData(false)
     }
@@ -188,6 +231,12 @@ function IpoScannerApp() {
     }
   }
 
+  // Get freshness info from stock data
+  const stockLastUpdated = stocks.length > 0 ? stocks[0]?.lastUpdated : ''
+  const stockDataSource = stocks.length > 0 ? stocks[0]?.dataSource : 'seed'
+  const displayLastUpdated = lastUpdated || stockLastUpdated
+  const displayDataSource = dataSource !== 'seed' ? dataSource : stockDataSource
+
   return (
     <div className="min-h-screen bg-slate-950 text-white">
       <div className="max-w-7xl mx-auto px-4 py-6 space-y-4">
@@ -199,6 +248,8 @@ function IpoScannerApp() {
           onManageStocks={() => setIsManageStocksOpen(true)}
           isRefreshing={isRefreshingData}
           isScanning={isScanning}
+          lastUpdated={displayLastUpdated}
+          dataSource={displayDataSource}
         />
 
         <FilterBar />

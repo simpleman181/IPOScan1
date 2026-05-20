@@ -36,6 +36,8 @@ model IpoStock {
   supportLevel          Float?
   breakoutDate          String?
   recommendation        String   @default("WATCH")
+  lastUpdated           String?  @default("never")
+  dataSource            String   @default("seed")
 
   dailyPrices           DailyPrice[]
   weeklyPrices          WeeklyPrice[]

@@ -74,6 +74,12 @@ export function StockCard({ stock, onClick }: StockCardProps) {
                 {isPositive ? '+' : ''}{gainFromIpo.toFixed(1)}% from IPO
               </span>
             </div>
+            {/* Data freshness indicator */}
+            {stock.dataSource && stock.dataSource !== 'seed' && stock.lastUpdated && stock.lastUpdated !== 'never' ? (
+              <span className="text-[9px] text-emerald-500/70">Live • {new Date(stock.lastUpdated).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</span>
+            ) : (
+              <span className="text-[9px] text-amber-500/70">Seed data (click Refresh for live)</span>
+            )}
           </div>
 
           {/* Mini Score Bars */}
