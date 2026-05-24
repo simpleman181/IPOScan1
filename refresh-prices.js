@@ -5,6 +5,7 @@ const { PrismaClient } = require('@prisma/client');
 const db = new PrismaClient();
 
 const SYMBOL_MAP = {
+  'LGEINDIA': { name: 'LGEINDIA', nse: 'LGEINDIA', minPrice: 1483 },
   'MTAR': { name: 'MTAR Technologies', nse: 'MTARTECH', min: 200, max: 2000 },
   'ADANIWILMAR': { name: 'Adani Wilmar AWL', nse: 'AWL', min: 100, max: 800 },
   'ETHOS': { name: 'Ethos Ltd', nse: 'ETHOSLTD', min: 500, max: 5000 },
