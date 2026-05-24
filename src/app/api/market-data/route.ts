@@ -1,27 +1,55 @@
 import { db } from '@/lib/db'
 import { NextResponse } from 'next/server'
 
+const YAHOO_QUOTE_URL = 'https://query1.finance.yahoo.com/v8/finance/chart'
 const YAHOO_SEARCH_URL = 'https://query1.finance.yahoo.com/v1/finance/search'
 
-async function fetchWithTimeout(url: string, timeoutMs: number = 10000) {
+async function fetchWithTimeout(url: string, timeoutMs = 8000): Promise<Response | null> {
   try {
     const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
-    const response = await fetch(url, {
+    const id = setTimeout(() => controller.abort(), timeoutMs)
+    const res = await fetch(url, {
       signal: controller.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json',
+      },
     })
-    clearTimeout(timeoutId)
-    return response
-  } catch { return null }
+    clearTimeout(id)
+    return res
+  } catch {
+    return null
+  }
+}
+
+async function fetchYahooPrice(symbol: string, exchange: string): Promise<number | null> {
+  // Try NSE first (.NS), then BSE (.BO)
+  const suffixes = exchange === 'BSE' ? ['.BO', '.NS'] : ['.NS', '.BO']
+  for (const suffix of suffixes) {
+    const yahooSymbol = `${symbol}${suffix}`
+    const url = `${YAHOO_QUOTE_URL}/${encodeURIComponent(yahooSymbol)}?interval=1d&range=1d`
+    const res = await fetchWithTimeout(url)
+    if (!res || !res.ok) continue
+    try {
+      const data = await res.json()
+      const quote = data?.chart?.result?.[0]
+      if (!quote) continue
+      const closes = quote.indicators?.quote?.[0]?.close
+      const meta = quote.meta
+      // Use regularMarketPrice or last close
+      const price = meta?.regularMarketPrice || (closes && closes.filter(Boolean).slice(-1)[0])
+      if (price && price > 0) return price
+    } catch { /* continue */ }
+  }
+  return null
 }
 
 async function searchYahooStocks(query: string) {
   const url = `${YAHOO_SEARCH_URL}?q=${encodeURIComponent(query)}&quotesCount=10&newsCount=0`
-  const response = await fetchWithTimeout(url, 8000)
-  if (response && response.ok) {
+  const res = await fetchWithTimeout(url)
+  if (res && res.ok) {
     try {
-      const data = await response.json()
+      const data = await res.json()
       return (data.quotes || [])
         .filter((q: any) => q.symbol && (q.symbol.endsWith('.NS') || q.symbol.endsWith('.BO')))
         .map((q: any) => ({
@@ -48,17 +76,45 @@ export async function POST(request: Request) {
     }
 
     if (mode === 'prices' || mode === 'full') {
-      // The price-fetcher service (port 3002) handles live data refresh and updates the DB directly.
-      // It auto-refreshes every 5 minutes and on startup.
-      // This endpoint just reads current DB state and reports status.
-      const stocks = await db.ipoStock.findMany({ select: { id: true, lastUpdated: true, dataSource: true } })
-      const liveCount = stocks.filter(s => s.dataSource !== 'seed' && s.lastUpdated && s.lastUpdated !== 'never').length
+      const stocks = await db.ipoStock.findMany({
+        select: { id: true, symbol: true, exchange: true, currentPrice: true, dataSource: true, lastUpdated: true },
+      })
+
+      if (stocks.length === 0) {
+        return NextResponse.json({ message: 'No stocks to update', updated: 0, total: 0 })
+      }
+
+      let updated = 0
+      let failed = 0
+
+      // Fetch prices in parallel batches of 5 to avoid rate limiting
+      const BATCH = 5
+      for (let i = 0; i < stocks.length; i += BATCH) {
+        const batch = stocks.slice(i, i + BATCH)
+        await Promise.all(batch.map(async (stock: any) => {
+          const price = await fetchYahooPrice(stock.symbol, stock.exchange)
+          if (price) {
+            await db.ipoStock.update({
+              where: { id: stock.id },
+              data: {
+                currentPrice: Math.round(price * 100) / 100,
+                lastUpdated: new Date().toISOString(),
+                dataSource: 'live',
+              },
+            })
+            updated++
+          } else {
+            failed++
+          }
+        }))
+        // Small delay between batches
+        if (i + BATCH < stocks.length) await new Promise(r => setTimeout(r, 200))
+      }
 
       return NextResponse.json({
-        message: liveCount > 0
-          ? `Live prices refreshed. ${liveCount}/${stocks.length} stocks have live data.`
-          : 'Price refresh is running in the background. Please wait ~2 minutes and refresh the page.',
-        updated: liveCount,
+        message: `Live prices refreshed. ${updated}/${stocks.length} stocks updated.${failed > 0 ? ` (${failed} failed - using last known prices)` : ''}`,
+        updated,
+        failed,
         total: stocks.length,
         timestamp: new Date().toISOString(),
       })
@@ -68,7 +124,15 @@ export async function POST(request: Request) {
       if (!stockId) return NextResponse.json({ error: 'stockId required' }, { status: 400 })
       const stock = await db.ipoStock.findUnique({ where: { id: stockId } })
       if (!stock) return NextResponse.json({ error: 'Stock not found' }, { status: 404 })
-      return NextResponse.json({ message: 'Stock data from DB', price: stock.currentPrice, source: stock.dataSource })
+      const price = await fetchYahooPrice(stock.symbol, stock.exchange)
+      if (price) {
+        const updated = await db.ipoStock.update({
+          where: { id: stockId },
+          data: { currentPrice: price, lastUpdated: new Date().toISOString(), dataSource: 'live' },
+        })
+        return NextResponse.json({ message: 'Price updated', price: updated.currentPrice, source: 'live' })
+      }
+      return NextResponse.json({ message: 'Could not fetch live price', price: stock.currentPrice, source: stock.dataSource })
     }
 
     return NextResponse.json({ error: 'Invalid mode' }, { status: 400 })
@@ -83,7 +147,7 @@ export async function GET() {
     const stocks = await db.ipoStock.findMany({
       select: { id: true, symbol: true, name: true, currentPrice: true, exchange: true, lastUpdated: true, dataSource: true },
     })
-    const lastUpdated = stocks.reduce((latest: string, s) => {
+    const lastUpdated = (stocks as any[]).reduce((latest: string, s: any) => {
       return s.lastUpdated && s.lastUpdated !== 'never' && s.lastUpdated > latest ? s.lastUpdated : latest
     }, '')
     return NextResponse.json({ stocks, count: stocks.length, lastUpdated })
