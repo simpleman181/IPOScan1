@@ -1,100 +1,128 @@
 /**
- * In-memory database replacing Prisma/SQLite for Vercel serverless compatibility.
- * Module-level state persists within warm function instances.
- * The app seeds itself on first request via /api/seed.
+ * Persistent database using Upstash Redis.
+ * - All stock data survives cold starts, redeployments, and server restarts.
+ * - In-memory Map used as a warm cache to avoid redundant Redis reads.
+ * - /api/seed populates Redis only if empty (first ever visit).
  */
 
+import { Redis } from '@upstash/redis'
 import { randomBytes } from 'crypto'
 
 function cuid(): string {
   return 'c' + randomBytes(16).toString('hex')
 }
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Redis client (reads KV_REST_API_URL + KV_REST_API_TOKEN from env) ────────
+const redis = Redis.fromEnv()
 
+// ─── Redis key helpers ────────────────────────────────────────────────────────
+const KEYS = {
+  stockSet: 'stocks:all',                      // SET of all stock IDs
+  stock: (id: string) => `stock:${id}`,        // HASH per stock
+  dailySet: (sid: string) => `daily:${sid}`,   // SET of daily price IDs
+  daily: (id: string) => `dp:${id}`,           // HASH per daily price
+  weeklySet: (sid: string) => `weekly:${sid}`, // SET of weekly price IDs
+  weekly: (id: string) => `wp:${id}`,          // HASH per weekly price
+  symbolIndex: (sym: string) => `sym:${sym.toUpperCase()}`, // symbol → stock id
+}
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 export interface IpoStock {
-  id: string
-  symbol: string
-  name: string
-  sector: string
-  ipoDate: string
-  ipoPrice: number
-  ipoOpenPrice: number
-  ipoDayLow: number
-  ipoDayHigh: number
-  currentPrice: number
-  listingGainPct: number
-  marketCap: string
-  exchange: string
-  horizontalPivotScore: number
-  volumeDryUpScore: number
-  breakoutVolumeScore: number
-  vcpScore: number
-  priceVsIpoLowScore: number
-  weeklyConvictionScore: number
-  totalScore: number
-  baseStatus: string
-  baseWeeks: number
-  pivotLevel: number | null
-  supportLevel: number | null
-  breakoutDate: string | null
-  recommendation: string
-  lastUpdated: string | null
-  dataSource: string
+  id: string; symbol: string; name: string; sector: string; ipoDate: string
+  ipoPrice: number; ipoOpenPrice: number; ipoDayLow: number; ipoDayHigh: number
+  currentPrice: number; listingGainPct: number; marketCap: string; exchange: string
+  horizontalPivotScore: number; volumeDryUpScore: number; breakoutVolumeScore: number
+  vcpScore: number; priceVsIpoLowScore: number; weeklyConvictionScore: number
+  totalScore: number; baseStatus: string; baseWeeks: number
+  pivotLevel: number | null; supportLevel: number | null; breakoutDate: string | null
+  recommendation: string; lastUpdated: string | null; dataSource: string
 }
 
 export interface DailyPrice {
-  id: string
-  stockId: string
-  date: string
-  open: number
-  high: number
-  low: number
-  close: number
-  volume: number
+  id: string; stockId: string; date: string
+  open: number; high: number; low: number; close: number; volume: number
 }
 
 export interface WeeklyPrice {
-  id: string
-  stockId: string
-  date: string
-  open: number
-  high: number
-  low: number
-  close: number
-  volume: number
+  id: string; stockId: string; date: string
+  open: number; high: number; low: number; close: number; volume: number
 }
 
-// ─── In-Memory Store ──────────────────────────────────────────────────────────
-
-const store = {
-  stocks: new Map<string, IpoStock>(),
-  dailyPrices: new Map<string, DailyPrice>(),
-  weeklyPrices: new Map<string, WeeklyPrice>(),
+// ─── Serialise / deserialise (Redis stores strings) ──────────────────────────
+function numFields<T extends object>(obj: T, fields: (keyof T)[]): T {
+  const out = { ...obj }
+  for (const f of fields) {
+    const v = (out as any)[f]
+    if (v !== null && v !== undefined && v !== 'null') (out as any)[f] = Number(v)
+    else if (v === 'null') (out as any)[f] = null
+  }
+  return out
 }
 
-// ─── Helper: case-insensitive contains ───────────────────────────────────────
-
-function icontains(str: string, sub: string): boolean {
-  return str.toLowerCase().includes(sub.toLowerCase())
+function stockFromRedis(raw: any): IpoStock {
+  return numFields(raw, [
+    'ipoPrice','ipoOpenPrice','ipoDayLow','ipoDayHigh','currentPrice',
+    'listingGainPct','horizontalPivotScore','volumeDryUpScore','breakoutVolumeScore',
+    'vcpScore','priceVsIpoLowScore','weeklyConvictionScore','totalScore','baseWeeks',
+    'pivotLevel','supportLevel',
+  ]) as IpoStock
 }
 
-// ─── Prisma-compatible db object ─────────────────────────────────────────────
+function priceFromRedis(raw: any): DailyPrice | WeeklyPrice {
+  return numFields(raw, ['open','high','low','close','volume']) as any
+}
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+async function getAllStockIds(): Promise<string[]> {
+  return (await redis.smembers(KEYS.stockSet)) as string[]
+}
+
+async function getStockById(id: string): Promise<IpoStock | null> {
+  const raw = await redis.hgetall(KEYS.stock(id))
+  if (!raw || Object.keys(raw).length === 0) return null
+  return stockFromRedis(raw)
+}
+
+async function getDailyPrices(stockId: string): Promise<DailyPrice[]> {
+  const ids = (await redis.smembers(KEYS.dailySet(stockId))) as string[]
+  if (!ids.length) return []
+  const prices = await Promise.all(ids.map(id => redis.hgetall(KEYS.daily(id))))
+  return prices
+    .filter(Boolean)
+    .map(p => priceFromRedis(p) as DailyPrice)
+    .sort((a, b) => a.date.localeCompare(b.date))
+}
+
+async function getWeeklyPrices(stockId: string): Promise<WeeklyPrice[]> {
+  const ids = (await redis.smembers(KEYS.weeklySet(stockId))) as string[]
+  if (!ids.length) return []
+  const prices = await Promise.all(ids.map(id => redis.hgetall(KEYS.weekly(id))))
+  return prices
+    .filter(Boolean)
+    .map(p => priceFromRedis(p) as WeeklyPrice)
+    .sort((a, b) => a.date.localeCompare(b.date))
+}
+
+// ─── Public db object (Prisma-compatible API) ─────────────────────────────────
 export const db = {
   ipoStock: {
     async count(): Promise<number> {
-      return store.stocks.size
+      return redis.scard(KEYS.stockSet)
     },
 
     async findMany(args?: {
-      where?: Partial<IpoStock> & { OR?: any[]; totalScore?: { gte: number } }
+      where?: any
       orderBy?: Record<string, 'asc' | 'desc'>
-      include?: { dailyPrices?: boolean | object; weeklyPrices?: boolean | object }
+      include?: { dailyPrices?: any; weeklyPrices?: any }
       select?: Record<string, boolean>
     }): Promise<any[]> {
-      let results = Array.from(store.stocks.values())
+      const ids = await getAllStockIds()
+      if (!ids.length) return []
 
+      const stocks = (await Promise.all(ids.map(getStockById))).filter(Boolean) as IpoStock[]
+
+      // Filter
+      let results = stocks
       if (args?.where) {
         const w = args.where
         results = results.filter(s => {
@@ -103,8 +131,9 @@ export const db = {
           if (w.totalScore?.gte !== undefined && s.totalScore < w.totalScore.gte) return false
           if (w.OR) {
             return w.OR.some((cond: any) => {
-              if (cond.symbol?.contains) return icontains(s.symbol, cond.symbol.contains)
-              if (cond.name?.contains) return icontains(s.name, cond.name.contains)
+              const sub = cond.symbol?.contains || cond.name?.contains || ''
+              if (cond.symbol?.contains) return s.symbol.toLowerCase().includes(sub.toLowerCase())
+              if (cond.name?.contains) return s.name.toLowerCase().includes(sub.toLowerCase())
               return false
             })
           }
@@ -112,6 +141,7 @@ export const db = {
         })
       }
 
+      // Sort
       if (args?.orderBy) {
         const [key, dir] = Object.entries(args.orderBy)[0]
         results.sort((a: any, b: any) => {
@@ -120,29 +150,16 @@ export const db = {
         })
       }
 
-      if (args?.include?.dailyPrices) {
-        return results.map(s => ({
-          ...s,
-          dailyPrices: Array.from(store.dailyPrices.values())
-            .filter(p => p.stockId === s.id)
-            .sort((a, b) => a.date.localeCompare(b.date)),
-        }))
-      }
+      // Include relations
       if (args?.include) {
-        const inc = args.include as any
-        if (inc.dailyPrices && inc.weeklyPrices) {
-          return results.map(s => ({
-            ...s,
-            dailyPrices: Array.from(store.dailyPrices.values())
-              .filter(p => p.stockId === s.id)
-              .sort((a, b) => a.date.localeCompare(b.date)),
-            weeklyPrices: Array.from(store.weeklyPrices.values())
-              .filter(p => p.stockId === s.id)
-              .sort((a, b) => a.date.localeCompare(b.date)),
-          }))
-        }
+        return Promise.all(results.map(async s => ({
+          ...s,
+          ...(args.include!.dailyPrices ? { dailyPrices: await getDailyPrices(s.id) } : {}),
+          ...(args.include!.weeklyPrices ? { weeklyPrices: await getWeeklyPrices(s.id) } : {}),
+        })))
       }
 
+      // Select
       if (args?.select) {
         const keys = Object.keys(args.select).filter(k => args.select![k])
         return results.map(s => Object.fromEntries(keys.map(k => [k, (s as any)[k]])))
@@ -153,34 +170,29 @@ export const db = {
 
     async findUnique(args: {
       where: { id?: string; symbol?: string }
-      include?: { dailyPrices?: boolean | object; weeklyPrices?: boolean | object }
+      include?: { dailyPrices?: any; weeklyPrices?: any }
     }): Promise<any | null> {
-      let stock: IpoStock | undefined
-      if (args.where.id) stock = store.stocks.get(args.where.id)
-      else if (args.where.symbol) stock = Array.from(store.stocks.values()).find(s => s.symbol === args.where.symbol)
+      let id = args.where.id
+      if (!id && args.where.symbol) {
+        id = (await redis.get(KEYS.symbolIndex(args.where.symbol))) as string | undefined
+      }
+      if (!id) return null
+      const stock = await getStockById(id)
       if (!stock) return null
-
       if (args.include) {
-        const inc = args.include as any
-        const result: any = { ...stock }
-        if (inc.dailyPrices) {
-          result.dailyPrices = Array.from(store.dailyPrices.values())
-            .filter(p => p.stockId === stock!.id)
-            .sort((a, b) => a.date.localeCompare(b.date))
+        return {
+          ...stock,
+          ...(args.include.dailyPrices ? { dailyPrices: await getDailyPrices(id) } : {}),
+          ...(args.include.weeklyPrices ? { weeklyPrices: await getWeeklyPrices(id) } : {}),
         }
-        if (inc.weeklyPrices) {
-          result.weeklyPrices = Array.from(store.weeklyPrices.values())
-            .filter(p => p.stockId === stock!.id)
-            .sort((a, b) => a.date.localeCompare(b.date))
-        }
-        return result
       }
       return stock
     },
 
-    async create(args: { data: Omit<IpoStock, 'id'> & { id?: string; dailyPrices?: { create: any[] }; weeklyPrices?: { create: any[] } }; include?: any }): Promise<IpoStock> {
-      const { dailyPrices: dpCreate, weeklyPrices: wpCreate, ...stockData } = args.data as any
+    async create(args: { data: any; include?: any }): Promise<any> {
+      const { dailyPrices: dpCreate, weeklyPrices: wpCreate, ...stockData } = args.data
       const id = stockData.id || cuid()
+
       const stock: IpoStock = {
         id,
         symbol: stockData.symbol,
@@ -211,111 +223,186 @@ export const db = {
         lastUpdated: stockData.lastUpdated ?? null,
         dataSource: stockData.dataSource ?? 'seed',
       }
-      store.stocks.set(id, stock)
 
-      if (dpCreate) {
+      // Persist stock
+      const pipe = redis.pipeline()
+      pipe.hset(KEYS.stock(id), stock as any)
+      pipe.sadd(KEYS.stockSet, id)
+      pipe.set(KEYS.symbolIndex(stock.symbol), id)
+
+      // Persist daily prices
+      if (dpCreate?.create) {
+        for (const dp of dpCreate.create) {
+          const pid = cuid()
+          pipe.hset(KEYS.daily(pid), { ...dp, id: pid, stockId: id })
+          pipe.sadd(KEYS.dailySet(id), pid)
+        }
+      } else if (Array.isArray(dpCreate)) {
         for (const dp of dpCreate) {
           const pid = cuid()
-          store.dailyPrices.set(pid, { ...dp, id: pid, stockId: id })
+          pipe.hset(KEYS.daily(pid), { ...dp, id: pid, stockId: id })
+          pipe.sadd(KEYS.dailySet(id), pid)
         }
       }
-      if (wpCreate) {
+
+      // Persist weekly prices
+      if (wpCreate?.create) {
+        for (const wp of wpCreate.create) {
+          const pid = cuid()
+          pipe.hset(KEYS.weekly(pid), { ...wp, id: pid, stockId: id })
+          pipe.sadd(KEYS.weeklySet(id), pid)
+        }
+      } else if (Array.isArray(wpCreate)) {
         for (const wp of wpCreate) {
           const pid = cuid()
-          store.weeklyPrices.set(pid, { ...wp, id: pid, stockId: id })
+          pipe.hset(KEYS.weekly(pid), { ...wp, id: pid, stockId: id })
+          pipe.sadd(KEYS.weeklySet(id), pid)
         }
       }
+
+      await pipe.exec()
 
       if (args.include) {
         return {
           ...stock,
-          dailyPrices: Array.from(store.dailyPrices.values()).filter(p => p.stockId === id).sort((a, b) => a.date.localeCompare(b.date)),
-          weeklyPrices: Array.from(store.weeklyPrices.values()).filter(p => p.stockId === id).sort((a, b) => a.date.localeCompare(b.date)),
-        } as any
+          dailyPrices: await getDailyPrices(id),
+          weeklyPrices: await getWeeklyPrices(id),
+        }
       }
       return stock
     },
 
     async update(args: { where: { id: string }; data: Partial<IpoStock> }): Promise<IpoStock> {
-      const stock = store.stocks.get(args.where.id)
-      if (!stock) throw new Error(`Stock ${args.where.id} not found`)
-      const updated = { ...stock, ...args.data }
-      store.stocks.set(args.where.id, updated)
+      const existing = await getStockById(args.where.id)
+      if (!existing) throw new Error(`Stock ${args.where.id} not found`)
+      const updated = { ...existing, ...args.data }
+      await redis.hset(KEYS.stock(args.where.id), updated as any)
       return updated
     },
 
+    async deleteMany(): Promise<{ count: number }> {
+      const ids = await getAllStockIds()
+      const pipe = redis.pipeline()
+      for (const id of ids) {
+        const stock = await getStockById(id)
+        if (stock) pipe.del(KEYS.symbolIndex(stock.symbol))
+        // daily prices
+        const dailyIds = (await redis.smembers(KEYS.dailySet(id))) as string[]
+        for (const pid of dailyIds) pipe.del(KEYS.daily(pid))
+        pipe.del(KEYS.dailySet(id))
+        // weekly prices
+        const weeklyIds = (await redis.smembers(KEYS.weeklySet(id))) as string[]
+        for (const pid of weeklyIds) pipe.del(KEYS.weekly(pid))
+        pipe.del(KEYS.weeklySet(id))
+        pipe.del(KEYS.stock(id))
+      }
+      pipe.del(KEYS.stockSet)
+      await pipe.exec()
+      return { count: ids.length }
+    },
+
     async delete(args: { where: { id?: string; symbol?: string } }): Promise<IpoStock> {
-      let id: string | undefined
-      if (args.where.id) {
-        id = args.where.id
-      } else if (args.where.symbol) {
-        const found = Array.from(store.stocks.values()).find(s => s.symbol === args.where.symbol)
-        id = found?.id
+      let id = args.where.id
+      if (!id && args.where.symbol) {
+        id = (await redis.get(KEYS.symbolIndex(args.where.symbol))) as string
       }
       if (!id) throw new Error('Stock not found')
-      const stock = store.stocks.get(id)!
-      store.stocks.delete(id)
+      const stock = await getStockById(id)
+      if (!stock) throw new Error('Stock not found')
+
+      // Delete daily + weekly prices
+      const [dailyIds, weeklyIds] = await Promise.all([
+        redis.smembers(KEYS.dailySet(id)) as Promise<string[]>,
+        redis.smembers(KEYS.weeklySet(id)) as Promise<string[]>,
+      ])
+      const pipe = redis.pipeline()
+      for (const pid of dailyIds) pipe.del(KEYS.daily(pid))
+      for (const pid of weeklyIds) pipe.del(KEYS.weekly(pid))
+      pipe.del(KEYS.dailySet(id))
+      pipe.del(KEYS.weeklySet(id))
+      pipe.del(KEYS.stock(id))
+      pipe.srem(KEYS.stockSet, id)
+      pipe.del(KEYS.symbolIndex(stock.symbol))
+      await pipe.exec()
+
       return stock
     },
   },
 
   dailyPrice: {
-    async createMany(args: { data: (Omit<DailyPrice, 'id'>)[] }): Promise<{ count: number }> {
+    async createMany(args: { data: Omit<DailyPrice, 'id'>[] }): Promise<{ count: number }> {
+      const pipe = redis.pipeline()
       for (const dp of args.data) {
         const id = cuid()
-        store.dailyPrices.set(id, { ...dp, id })
+        pipe.hset(KEYS.daily(id), { ...dp, id })
+        pipe.sadd(KEYS.dailySet(dp.stockId), id)
       }
+      await pipe.exec()
       return { count: args.data.length }
     },
 
     async deleteMany(args?: { where?: { stock?: { id?: string; symbol?: string } } }): Promise<{ count: number }> {
       if (!args?.where?.stock) {
-        const count = store.dailyPrices.size
-        store.dailyPrices.clear()
-        return { count }
+        // Clear ALL daily prices
+        const stockIds = await getAllStockIds()
+        const pipe = redis.pipeline()
+        for (const sid of stockIds) {
+          const ids = (await redis.smembers(KEYS.dailySet(sid))) as string[]
+          for (const pid of ids) pipe.del(KEYS.daily(pid))
+          pipe.del(KEYS.dailySet(sid))
+        }
+        await pipe.exec()
+        return { count: 0 }
       }
-      let stockId: string | undefined
-      if (args.where.stock.id) stockId = args.where.stock.id
-      else if (args.where.stock.symbol) {
-        const found = Array.from(store.stocks.values()).find(s => s.symbol === args!.where!.stock!.symbol)
-        stockId = found?.id
+      let stockId = args.where.stock.id
+      if (!stockId && args.where.stock.symbol) {
+        stockId = (await redis.get(KEYS.symbolIndex(args.where.stock.symbol))) as string
       }
       if (!stockId) return { count: 0 }
-      let count = 0
-      for (const [id, dp] of store.dailyPrices) {
-        if (dp.stockId === stockId) { store.dailyPrices.delete(id); count++ }
-      }
-      return { count }
+      const ids = (await redis.smembers(KEYS.dailySet(stockId))) as string[]
+      const pipe = redis.pipeline()
+      for (const pid of ids) pipe.del(KEYS.daily(pid))
+      pipe.del(KEYS.dailySet(stockId))
+      await pipe.exec()
+      return { count: ids.length }
     },
   },
 
   weeklyPrice: {
-    async createMany(args: { data: (Omit<WeeklyPrice, 'id'>)[] }): Promise<{ count: number }> {
+    async createMany(args: { data: Omit<WeeklyPrice, 'id'>[] }): Promise<{ count: number }> {
+      const pipe = redis.pipeline()
       for (const wp of args.data) {
         const id = cuid()
-        store.weeklyPrices.set(id, { ...wp, id })
+        pipe.hset(KEYS.weekly(id), { ...wp, id })
+        pipe.sadd(KEYS.weeklySet(wp.stockId), id)
       }
+      await pipe.exec()
       return { count: args.data.length }
     },
 
     async deleteMany(args?: { where?: { stock?: { id?: string; symbol?: string } } }): Promise<{ count: number }> {
       if (!args?.where?.stock) {
-        const count = store.weeklyPrices.size
-        store.weeklyPrices.clear()
-        return { count }
+        const stockIds = await getAllStockIds()
+        const pipe = redis.pipeline()
+        for (const sid of stockIds) {
+          const ids = (await redis.smembers(KEYS.weeklySet(sid))) as string[]
+          for (const pid of ids) pipe.del(KEYS.weekly(pid))
+          pipe.del(KEYS.weeklySet(sid))
+        }
+        await pipe.exec()
+        return { count: 0 }
       }
-      let stockId: string | undefined
-      if (args.where.stock.id) stockId = args.where.stock.id
-      else if (args.where.stock.symbol) {
-        const found = Array.from(store.stocks.values()).find(s => s.symbol === args!.where!.stock!.symbol)
-        stockId = found?.id
+      let stockId = args.where.stock.id
+      if (!stockId && args.where.stock.symbol) {
+        stockId = (await redis.get(KEYS.symbolIndex(args.where.stock.symbol))) as string
       }
       if (!stockId) return { count: 0 }
-      let count = 0
-      for (const [id, wp] of store.weeklyPrices) {
-        if (wp.stockId === stockId) { store.weeklyPrices.delete(id); count++ }
-      }
-      return { count }
+      const ids = (await redis.smembers(KEYS.weeklySet(stockId))) as string[]
+      const pipe = redis.pipeline()
+      for (const pid of ids) pipe.del(KEYS.weekly(pid))
+      pipe.del(KEYS.weeklySet(stockId))
+      await pipe.exec()
+      return { count: ids.length }
     },
   },
 }
