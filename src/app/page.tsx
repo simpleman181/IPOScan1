@@ -144,6 +144,33 @@ function IpoScannerApp() {
     }
   }
 
+  const handleRefreshHistory = async () => {
+    setIsRefreshingData(true)
+    toast.info('Fetching 6 months of real OHLCV history from Yahoo Finance — this takes ~30s...')
+    try {
+      const res = await fetch('/api/market-data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'history' }),
+      })
+      const data = await res.json()
+      if (data.failed > 0) {
+        toast.warning(`History updated for ${data.updated}/${data.total} stocks (${data.failed} used synthetic fallback)`)
+      } else {
+        toast.success(data.message || 'Real OHLCV history loaded')
+      }
+      if (data.timestamp) setLastUpdated(data.timestamp)
+      setDataSource('live')
+      queryClient.invalidateQueries({ queryKey: ['ipo-stocks'] })
+      // Re-run scanner now that we have real data
+      await handleRunScanner()
+    } catch {
+      toast.error('Failed to fetch history — check your connection')
+    } finally {
+      setIsRefreshingData(false)
+    }
+  }
+
   const handleFullRefresh = async () => {
     setIsRefreshingData(true)
     try {
@@ -243,6 +270,7 @@ function IpoScannerApp() {
         <Header
           stats={stats}
           onRefreshPrices={handleRefreshPrices}
+          onRefreshHistory={handleRefreshHistory}
           onFullRefresh={handleFullRefresh}
           onRunScanner={handleRunScanner}
           onManageStocks={() => setIsManageStocksOpen(true)}

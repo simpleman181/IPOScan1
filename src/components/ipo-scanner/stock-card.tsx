@@ -12,6 +12,7 @@ interface StockCardProps {
 
 const statusColors: Record<string, string> = {
   FORMING: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
+  COILING: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
   BREAKOUT: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
   ADVANCING: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
   FAILED: 'bg-red-500/20 text-red-400 border-red-500/30',
@@ -90,7 +91,26 @@ export function StockCard({ stock, onClick }: StockCardProps) {
             <MiniScoreBar label="VCP" score={stock.vcpScore} />
             <MiniScoreBar label="vs IPO Low" score={stock.priceVsIpoLowScore} />
             <MiniScoreBar label="Weekly Conv" score={stock.weeklyConvictionScore} />
+            {stock.pocketPivotScore != null && <MiniScoreBar label="Pocket Pivot" score={stock.pocketPivotScore} />}
+            {stock.rsScore != null && <MiniScoreBar label="RS vs Nifty" score={stock.rsScore} />}
           </div>
+
+          {/* Proximity to pivot */}
+          {stock.proximityToPivot != null && stock.pivotLevel > 0 && (
+            <div className="mt-2 flex items-center gap-1.5">
+              <span className="text-[9px] text-slate-500 uppercase tracking-wide">Pivot</span>
+              <span className="text-[10px] font-mono text-slate-400">₹{Number(stock.pivotLevel).toFixed(0)}</span>
+              <span className={`text-[10px] font-medium ml-auto ${
+                stock.proximityToPivot >= 0 && stock.proximityToPivot <= 3
+                  ? 'text-emerald-400'
+                  : stock.proximityToPivot > 3
+                    ? 'text-amber-400'
+                    : 'text-slate-400'
+              }`}>
+                {stock.proximityToPivot >= 0 ? '+' : ''}{Number(stock.proximityToPivot).toFixed(1)}% from pivot
+              </span>
+            </div>
+          )}
 
           {/* Recommendation badge */}
           <div className="mt-3 flex items-center justify-between">

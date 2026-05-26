@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge'
 interface HeaderProps {
   stats: { total: number; strongBuy: number; buy: number; watch: number; avoid: number }
   onRefreshPrices: () => void
+  onRefreshHistory: () => void
   onFullRefresh: () => void
   onRunScanner: () => void
   onManageStocks: () => void
@@ -45,7 +46,7 @@ function isDataStale(timestamp: string): boolean {
   }
 }
 
-export function Header({ stats, onRefreshPrices, onFullRefresh, onRunScanner, onManageStocks, isRefreshing, isScanning, lastUpdated = 'never', dataSource = 'seed' }: HeaderProps) {
+export function Header({ stats, onRefreshPrices, onRefreshHistory, onFullRefresh, onRunScanner, onManageStocks, isRefreshing, isScanning, lastUpdated = 'never', dataSource = 'seed' }: HeaderProps) {
   const stale = isDataStale(lastUpdated)
   const isSeedData = dataSource === 'seed' || !lastUpdated || lastUpdated === 'never'
 
@@ -97,6 +98,9 @@ export function Header({ stats, onRefreshPrices, onFullRefresh, onRunScanner, on
             </Button>
             <Button variant="outline" size="sm" onClick={onRefreshPrices} disabled={isRefreshing} className="border-slate-700 text-slate-300 hover:bg-slate-800 hover:text-white">
               <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${isRefreshing ? 'animate-spin' : ''}`} /> Live Prices
+            </Button>
+            <Button variant="outline" size="sm" onClick={onRefreshHistory} disabled={isRefreshing} className="border-purple-700/50 text-purple-300 hover:bg-purple-900/30 hover:text-purple-200">
+              <RotateCcw className={`mr-1.5 h-3.5 w-3.5 ${isRefreshing ? 'animate-spin' : ''}`} /> Real History
             </Button>
             <Button variant="outline" size="sm" onClick={onFullRefresh} disabled={isRefreshing} className="border-slate-700 text-slate-300 hover:bg-slate-800 hover:text-white">
               <RotateCcw className={`mr-1.5 h-3.5 w-3.5 ${isRefreshing ? 'animate-spin' : ''}`} /> Full Refresh

@@ -36,6 +36,10 @@ export interface IpoStock {
   totalScore: number; baseStatus: string; baseWeeks: number
   pivotLevel: number | null; supportLevel: number | null; breakoutDate: string | null
   recommendation: string; lastUpdated: string | null; dataSource: string
+  // New pre-breakout signals
+  rsScore: number | null        // Relative Strength vs Nifty 50 (0–100)
+  pocketPivotScore: number | null // Pocket pivot accumulation signal (0–100)
+  proximityToPivot: number | null // % distance from current price to pivot (negative = below pivot)
 }
 
 export interface DailyPrice {
@@ -64,7 +68,7 @@ function stockFromRedis(raw: any): IpoStock {
     'ipoPrice','ipoOpenPrice','ipoDayLow','ipoDayHigh','currentPrice',
     'listingGainPct','horizontalPivotScore','volumeDryUpScore','breakoutVolumeScore',
     'vcpScore','priceVsIpoLowScore','weeklyConvictionScore','totalScore','baseWeeks',
-    'pivotLevel','supportLevel',
+    'pivotLevel','supportLevel','rsScore','pocketPivotScore','proximityToPivot',
   ]) as IpoStock
 }
 
@@ -222,6 +226,9 @@ export const db = {
         recommendation: stockData.recommendation ?? 'WATCH',
         lastUpdated: stockData.lastUpdated ?? null,
         dataSource: stockData.dataSource ?? 'seed',
+        rsScore: stockData.rsScore ?? null,
+        pocketPivotScore: stockData.pocketPivotScore ?? null,
+        proximityToPivot: stockData.proximityToPivot ?? null,
       }
 
       // Persist stock
